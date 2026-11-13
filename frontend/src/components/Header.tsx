@@ -1,202 +1,141 @@
-'use client';
-import { useState } from 'react';
-import { Terminal, Menu, X, ArrowUpRight, Search, Volume2, VolumeX } from 'lucide-react';
-import GithubIcon from './GithubIcon';
-import { AppRoute } from '../types';
-import { siteConfig } from '../config/site.config';
-import { isSoundEnabled, toggleSound, playClickSound } from '../utils/sound';
+import React, { useEffect, useState } from 'react';
+import { ViewState } from '../types/khata';
 
 interface HeaderProps {
-  currentRoute: AppRoute;
-  onNavigate: (route: AppRoute) => void;
-  onOpenCommandPalette?: () => void;
+  currentView: ViewState;
+  onSelectView: (view: ViewState) => void;
+  isListening: boolean;
+  dspActive: boolean;
+  onOpenCustomDomain: () => void;
+  onResetDb: () => void;
 }
 
-export default function Header({ currentRoute, onNavigate, onOpenCommandPalette }: HeaderProps) {
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [soundActive, setSoundActive] = useState(() => isSoundEnabled());
+export const Header: React.FC<HeaderProps> = ({
+  currentView,
+  onSelectView,
+  isListening,
+  dspActive,
+  onOpenCustomDomain,
+  onResetDb
+}) => {
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
-  const handleRouteClick = (route: AppRoute) => {
-    playClickSound();
-    setMobileMenuOpen(false);
-    onNavigate(route);
-  };
+  useEffect(() => {
+    const handleFsChange = () => {
+      setIsFullscreen(Boolean(document.fullscreenElement));
+    };
+    document.addEventListener('fullscreenchange', handleFsChange);
+    return () => document.removeEventListener('fullscreenchange', handleFsChange);
+  }, []);
 
-  const handleSoundToggle = () => {
-    const newState = toggleSound();
-    setSoundActive(newState);
-    if (newState) {
-      playClickSound();
+  const handleToggleFullscreen = () => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen().catch(() => {});
+    } else {
+      document.exitFullscreen().catch(() => {});
     }
   };
 
-  const handleCommandPaletteClick = () => {
-    playClickSound();
-    if (onOpenCommandPalette) {
-      onOpenCommandPalette();
-    }
-  };
+  const navItems: { id: ViewState; label: string; num: string }[] = [
+    { id: 'console', label: 'LIVE CONSOLE', num: '01' },
+    { id: 'ledger', label: 'BAHI-KHATA LEDGER', num: '02' },
+    { id: 'judge', label: 'JUDGE STRESS-TEST', num: '03' },
+    { id: 'privacy', label: 'PRIVACY POLICY', num: '04' },
+    { id: 'terms', label: 'TERMS & CONDITIONS', num: '05' }
+  ];
 
   return (
-    <header className="site-header" role="banner">
-      <div className="container header-inner">
-        <a
-          href="#main-content"
-          className="brand-link"
-          onClick={(e) => {
-            e.preventDefault();
-            handleRouteClick('home');
-          }}
-          aria-label={`${siteConfig.projectName} Home`}
-        >
-          <div className="brand-mark" aria-hidden="true">
-            <Terminal size={16} />
-          </div>
-          <span>{siteConfig.projectName}</span>
-          <span className="tag" style={{ marginLeft: 6 }}>v1.0.0</span>
-        </a>
+    <header className="sticky top-0 z-40 bg-[#141413] border-b border-[#2D2D2A] text-[#F4F1EA] select-none w-full">
+      {/* Topmost Technical Telemetry Bar */}
+      <div className="flex items-center justify-between px-4 sm:px-6 py-1.5 bg-[#0E0E0D] border-b border-[#222220] font-mono-tech text-xs text-[#8E8A82] w-full">
+        <div className="flex items-center gap-5">
+          <span className="flex items-center gap-2">
+            <span className={`mech-led ${isListening ? 'active-red' : ''}`} />
+            <span>MIC: {isListening ? 'STREAMING [RAW_IN]' : 'STANDBY'}</span>
+          </span>
+          <span className="flex items-center gap-2">
+            <span className={`mech-led ${dspActive ? 'active-green' : ''}`} />
+            <span>DSP: {dspActive ? '120Hz-HPF+NOTCH' : 'OFF'}</span>
+          </span>
+          <span className="flex items-center gap-2">
+            <span className="mech-led active-green" />
+            <span>STORE: AES-GCM-256 [LOCAL_ONLY]</span>
+          </span>
+        </div>
 
-        <button
-          className="mobile-nav-toggle"
-          onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-          aria-label={mobileMenuOpen ? 'Close navigation menu' : 'Open navigation menu'}
-          aria-expanded={mobileMenuOpen}
-        >
-          {mobileMenuOpen ? <X size={20} /> : <Menu size={20} />}
-        </button>
-
-        <nav
-          className={`nav-menu ${mobileMenuOpen ? 'open' : ''}`}
-          role="navigation"
-          aria-label="Main Navigation"
-        >
+        <div className="flex items-center gap-3">
           <button
-            className={`nav-item ${currentRoute === 'home' ? 'active' : ''}`}
-            onClick={() => handleRouteClick('home')}
-            aria-current={currentRoute === 'home' ? 'page' : undefined}
+            type="button"
+            onClick={handleToggleFullscreen}
+            className="hover:text-[#C88A2B] transition-colors font-bold text-[#C88A2B]"
+            title="Toggle Browser Fullscreen Mode"
           >
-            Home
+            {isFullscreen ? '[EXIT_FULLSCREEN]' : '[ENTER_FULLSCREEN]'}
           </button>
+          <span className="text-[#3E3E3A]">|</span>
           <button
-            className={`nav-item ${currentRoute === 'dashboard' ? 'active' : ''}`}
-            onClick={() => handleRouteClick('dashboard')}
-            aria-current={currentRoute === 'dashboard' ? 'page' : undefined}
+            type="button"
+            onClick={onOpenCustomDomain}
+            className="hover:text-[#C88A2B] transition-colors"
           >
-            Dashboard
+            [DOMAIN: khata.yourdomain.in]
           </button>
+          <span className="text-[#3E3E3A]">|</span>
           <button
-            className={`nav-item ${currentRoute === 'docs' ? 'active' : ''}`}
-            onClick={() => handleRouteClick('docs')}
-            aria-current={currentRoute === 'docs' ? 'page' : undefined}
+            type="button"
+            onClick={onResetDb}
+            className="hover:text-[#D9381E] transition-colors"
+            title="Reset IndexedDB to default Kirana seed data"
           >
-            Docs &amp; Architecture
-          </button>
-          <button
-            className={`nav-item ${currentRoute === 'domain' ? 'active' : ''}`}
-            onClick={() => handleRouteClick('domain')}
-            aria-current={currentRoute === 'domain' ? 'page' : undefined}
-          >
-            Custom Domain
-          </button>
-          <button
-            className={`nav-item ${currentRoute === 'privacy' ? 'active' : ''}`}
-            onClick={() => handleRouteClick('privacy')}
-            aria-current={currentRoute === 'privacy' ? 'page' : undefined}
-          >
-            Privacy
-          </button>
-          <button
-            className={`nav-item ${currentRoute === 'terms' ? 'active' : ''}`}
-            onClick={() => handleRouteClick('terms')}
-            aria-current={currentRoute === 'terms' ? 'page' : undefined}
-          >
-            Terms
-          </button>
-        </nav>
-
-        <div className="header-right">
-          {/* Global Command Palette Trigger */}
-          <button
-            onClick={handleCommandPaletteClick}
-            className="btn btn-secondary btn-sm cmdk-btn"
-            aria-label="Open Command Palette (Command + K)"
-            title="Press Command + K"
-          >
-            <Search size={13} />
-            <span className="cmdk-label hide-mobile">Search</span>
-            <kbd className="cmdk-kbd">Cmd K</kbd>
-          </button>
-
-          {/* Sound Toggle */}
-          <button
-            onClick={handleSoundToggle}
-            className="btn btn-secondary btn-sm icon-btn"
-            aria-label={soundActive ? 'Tactile Audio Enabled. Click to Mute.' : 'Tactile Audio Muted. Click to Enable.'}
-            title={soundActive ? 'Mute procedural audio' : 'Enable procedural audio'}
-            style={{ width: 34, height: 34, padding: 0, justifyContent: 'center' }}
-          >
-            {soundActive ? <Volume2 size={14} color="#D97706" /> : <VolumeX size={14} />}
-          </button>
-
-          <a
-            href={siteConfig.githubProfileUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="btn btn-secondary btn-sm"
-            aria-label="GitHub Profile @jayvirjadeja008-gif"
-          >
-            <GithubIcon size={14} />
-            <span className="hide-mobile">@{siteConfig.githubUsername}</span>
-          </a>
-          <button
-            onClick={() => handleRouteClick('install')}
-            className="btn btn-primary btn-sm"
-            aria-label="Install GitHub App"
-            id="header-install-btn"
-          >
-            <span>Install</span>
-            <ArrowUpRight size={13} />
+            [RE-SEED_DB]
           </button>
         </div>
       </div>
 
-      <style>{`
-        .cmdk-btn {
-          display: inline-flex;
-          align-items: center;
-          gap: 6px;
-          padding: 6px 10px;
-          background: #161B22;
-          border: 1px solid #30363D;
-          color: #8B949E;
-          border-radius: 4px;
-          font-size: 0.8125rem;
-          cursor: pointer;
-          transition: border-color 0.15s ease, color 0.15s ease;
-        }
-        .cmdk-btn:hover {
-          border-color: #D97706;
-          color: #F0F6FC;
-        }
-        .cmdk-label {
-          font-size: 0.8125rem;
-        }
-        .cmdk-kbd {
-          background: #0E1116;
-          border: 1px solid #30363D;
-          border-radius: 3px;
-          padding: 1px 5px;
-          font-size: 0.6875rem;
-          color: #8B949E;
-          font-family: monospace;
-          line-height: 1;
-        }
-        @media (max-width: 768px) {
-          .hide-mobile {
-            display: none;
-          }
-        }
-      `}</style>
+      {/* Main Navigation Row */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between px-4 sm:px-6 py-3 gap-3 w-full">
+        {/* Brand & Hardware Mark */}
+        <div className="flex items-center gap-3.5">
+          <div className="w-9 h-9 bg-[#D9381E] border border-[#A92610] flex items-center justify-center font-mono-tech font-bold text-sm text-white shadow-xs">
+            VK
+          </div>
+          <div>
+            <div className="flex items-center gap-2.5">
+              <span className="font-mono-tech font-bold text-base tracking-wider uppercase text-[#F4F1EA]">
+                Voice Khata
+              </span>
+              <span className="text-[11px] font-mono-tech px-2 py-0.5 bg-[#262622] text-[#C88A2B] border border-[#3A3830]">
+                HARDWARE_UI // TE_BRAUN
+              </span>
+            </div>
+            <span className="text-xs text-[#736F66] font-mono-tech block mt-0.5">
+              PS2 GNANI VOICE EVALUATION PLATFORM
+            </span>
+          </div>
+        </div>
+
+        {/* 3D Spatial Navigation Tabs */}
+        <nav className="flex flex-wrap items-center gap-1.5 font-mono-tech text-xs sm:text-sm">
+          {navItems.map((item) => {
+            const isActive = currentView === item.id;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => onSelectView(item.id)}
+                className={`px-3.5 py-2 border transition-all ${
+                  isActive
+                    ? 'border-[#D9381E] bg-[#D9381E] text-white font-bold shadow-xs'
+                    : 'border-[#262624] bg-[#181816] text-[#A8A49C] hover:text-[#F4F1EA] hover:border-[#383834]'
+                }`}
+              >
+                <span className="text-[11px] opacity-75 mr-1.5">{item.num}</span>
+                <span>{item.label}</span>
+              </button>
+            );
+          })}
+        </nav>
+      </div>
     </header>
   );
-}
+};

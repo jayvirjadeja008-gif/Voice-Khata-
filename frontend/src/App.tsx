@@ -1,204 +1,533 @@
-import { useState, useEffect, Suspense, useCallback, lazy } from 'react';
-import Header from './components/Header';
-import Footer from './components/Footer';
-import CommandPalette from './components/CommandPalette';
-import HomePage from './pages/HomePage';
-import DashboardPage from './pages/DashboardPage';
-import DocsPage from './pages/DocsPage';
-import PrivacyPage from './pages/PrivacyPage';
-import TermsPage from './pages/TermsPage';
-import NotFoundPage from './pages/NotFoundPage';
-import InstallPage from './pages/InstallPage';
-import CustomDomainConfig from './components/CustomDomainConfig';
-import { AppRoute } from './types';
-import { siteConfig } from './config/site.config';
-import { isWebGLAvailable, prefersReducedMotion } from './utils/transition';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Header } from './components/Header';
+import { SpatialStage } from './components/SpatialStage';
+import { LiveVoiceConsole } from './components/LiveVoiceConsole';
+import { BahiKhataLedger } from './components/BahiKhataLedger';
+import { JudgeStressTestDeck } from './components/JudgeStressTestDeck';
+import { PrivacyPolicyView } from './components/PrivacyPolicyView';
+import { TermsConditionsView } from './components/TermsConditionsView';
+import { DisambiguationModal } from './components/DisambiguationModal';
+import { PoliteReminderModal } from './components/PoliteReminderModal';
+import { CustomDomainModal } from './components/CustomDomainModal';
 
-// Lazy-load Three.js transition component to keep initial bundle ultra small
-const ThreeTransition = lazy(() => import('./components/ThreeTransition'));
+import {
+  Customer,
+  LedgerEntry,
+  ParsedTransactionClause,
+  ViewState,
+  VoiceLatencyMetrics
+} from './types/khata';
+import {
+  addLedgerEntry,
+  getAllCustomers,
+  getAllEntries,
+  getDailySummary,
+  initDb,
+  resetDatabase,
+  updateCustomerOptIn
+} from './services/db';
+import { parseUtterance } from './services/parser';
+import { audioEngine } from './services/audioEngine';
+import { speechRecognitionEngine } from './services/speechRecognition';
+import { speechSynthesisEngine } from './services/speechSynthesis';
+import { getSecurityStatus } from './services/crypto';
 
-function getInitialRoute(): AppRoute {
-  if (typeof window === 'undefined') return 'home';
-  const path = window.location.pathname.replace(/^\/+|\/+$/g, '').toLowerCase();
-  if (path === '' || path === 'home') return 'home';
-  if (path === 'dashboard' || path === 'workbench') return 'dashboard';
-  if (path === 'docs' || path === 'how-it-works') return 'docs';
-  if (path === 'privacy') return 'privacy';
-  if (path === 'terms') return 'terms';
-  if (path === 'domain') return 'domain';
-  if (path === 'install') return 'install';
-  return '404';
-}
+export const App: React.FC = () => {
+  // Navigation & View
+  const [currentView, setCurrentView] = useState<ViewState>('console');
 
-export default function App() {
-  const [currentRoute, setCurrentRoute] = useState<AppRoute>(getInitialRoute);
-  const [targetRoute, setTargetRoute] = useState<AppRoute | null>(null);
-  const [is3DTransitionActive, setIs3DTransitionActive] = useState(false);
-  const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
+  // Khata Data
+  const [entries, setEntries] = useState<LedgerEntry[]>([]);
+  const [customers, setCustomers] = useState<Customer[]>([]);
 
-  // Global keyboard shortcut for Command Palette (Cmd + K or Ctrl + K)
+  // Speech & Parsing State
+  const [isListening, setIsListening] = useState(false);
+  const [language, setLanguage] = useState<'hi-IN' | 'en-IN' | 'kn-IN' | 'ta-IN'>('hi-IN');
+  const [rawTranscript, setRawTranscript] = useState('');
+  const [interimTranscript, setInterimTranscript] = useState('');
+  const [clauses, setClauses] = useState<ParsedTransactionClause[]>([]);
+
+  // Acoustic Noise & DSP
+  const [isNoiseActive, setIsNoiseActive] = useState(false);
+  const [snrDb, setSnrDb] = useState(-3);
+  const [dspActive, setDspActive] = useState(true);
+
+  // Latency & Metrics
+  const [latencyMetrics, setLatencyMetrics] = useState<VoiceLatencyMetrics>({
+    ttfaMs: 0,
+    sttMs: 0,
+    nlpMs: 0,
+    ttsMs: 0,
+    e2eMs: 0,
+    lastQuery: ''
+  });
+
+  // Modals
+  const [disambiguationState, setDisambiguationState] = useState<{
+    isOpen: boolean;
+    options: Customer[];
+    amount: number;
+    txType: 'UDHAAR' | 'JAMA';
+    clause: ParsedTransactionClause;
+  } | null>(null);
+
+  const [reminderCustomer, setReminderCustomer] = useState<Customer | null>(null);
+  const [customDomainOpen, setCustomDomainOpen] = useState(false);
+
+  // Timers & Refs
+  const recognitionStartTimeRef = useRef<number>(0);
+  const customersRef = useRef<Customer[]>([]);
+  useEffect(() => {
+    customersRef.current = customers;
+  }, [customers]);
+
+  // Sync hash routing e.g. #privacy, #terms, #ledger, #judge, #console
+  useEffect(() => {
+    const handleHash = () => {
+      const hash = window.location.hash.replace('#', '') as ViewState;
+      if (['console', 'ledger', 'judge', 'privacy', 'terms'].includes(hash)) {
+        setCurrentView(hash);
+      }
+    };
+    handleHash();
+    window.addEventListener('hashchange', handleHash);
+    return () => window.removeEventListener('hashchange', handleHash);
+  }, []);
+
+  const handleSelectView = (view: ViewState) => {
+    setCurrentView(view);
+    window.location.hash = view;
+  };
+
+  // Load Database on Mount
+  const refreshDbData = useCallback(async () => {
+    try {
+      await initDb();
+      const allC = await getAllCustomers();
+      const allE = await getAllEntries();
+      setCustomers(allC);
+      setEntries(allE);
+    } catch {
+      // IndexedDB loading handled
+    }
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const load = async () => {
+      await initDb();
+      if (!active) return;
+      const allC = await getAllCustomers();
+      const allE = await getAllEntries();
+      if (!active) return;
+      setCustomers(allC);
+      setEntries(allE);
+    };
+    load();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  // Subscribe to voice synthesis latency updates
+  useEffect(() => {
+    speechSynthesisEngine.subscribeMetrics((metrics) => {
+      setLatencyMetrics(metrics);
+    });
+  }, []);
+
+  // Handle Query Intent (e.g., "Aaj kitna udhaar gaya?", "Ramesh ka total?")
+  const handleQueryExecution = useCallback(
+    async (clause: ParsedTransactionClause, sttDurationMs: number) => {
+      const nlpStart = performance.now();
+
+      if (clause.queryType === 'TODAY_TOTAL') {
+        const summary = await getDailySummary();
+        const nlpMs = Math.round(performance.now() - nlpStart);
+        const replyText = `Aaj kul ${summary.todayUdhaar} rupaye ka udhaar gaya hai.`;
+        speechSynthesisEngine.speakPrompt(replyText, 'hi-IN', {
+          sttDurationMs,
+          nlpDurationMs: nlpMs,
+          query: clause.originalClause
+        });
+      } else if (clause.queryType === 'CUSTOMER_TOTAL' && clause.matchedCustomerName) {
+        const cust = customersRef.current.find((c) => c.name === clause.matchedCustomerName);
+        const bal = cust ? cust.currentBalance : 0;
+        const nlpMs = Math.round(performance.now() - nlpStart);
+        const replyText = `${clause.matchedCustomerName} ka kul baaki balance ${bal} rupaye hai.`;
+        speechSynthesisEngine.speakPrompt(replyText, 'hi-IN', {
+          sttDurationMs,
+          nlpDurationMs: nlpMs,
+          query: clause.originalClause
+        });
+      } else {
+        const summary = await getDailySummary();
+        const nlpMs = Math.round(performance.now() - nlpStart);
+        const replyText = `Aaj dukaan par kul ${summary.todayJama} rupaye ki jama aayi hai.`;
+        speechSynthesisEngine.speakPrompt(replyText, 'hi-IN', {
+          sttDurationMs,
+          nlpDurationMs: nlpMs,
+          query: clause.originalClause
+        });
+      }
+    },
+    []
+  );
+
+  // Commit Parsed Clauses to Ledger
+  const commitParsedClauses = useCallback(
+    async (parsedClauses: ParsedTransactionClause[]) => {
+      for (const clause of parsedClauses) {
+        // Query check
+        if (clause.isQuery) {
+          continue;
+        }
+
+        // Homonym check
+        if (clause.requiresDisambiguation && clause.disambiguationOptions) {
+          audioEngine.playDisambiguationBeep();
+          setDisambiguationState({
+            isOpen: true,
+            options: clause.disambiguationOptions,
+            amount: clause.normalizedAmount,
+            txType: clause.txType === 'JAMA' ? 'JAMA' : 'UDHAAR',
+            clause
+          });
+
+          // Disambiguation spoken interrupt within 400ms
+          speechSynthesisEngine.speakPrompt(
+            'Kaunsa Ramesh? Dairy wala ya Auto wala?',
+            'hi-IN',
+            { sttDurationMs: 220, nlpDurationMs: 40, query: clause.originalClause }
+          );
+          return; // pause commit until resolved
+        }
+
+        // Normal atomic commit
+        if (clause.normalizedAmount > 0) {
+          const entryId = `tx-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+          const cust = customersRef.current.find(
+            (c) => c.name === clause.matchedCustomerName || c.name === clause.entityRaw
+          );
+
+          const newEntry: LedgerEntry = {
+            id: entryId,
+            customerId: cust ? cust.id : `cust-gen-${Date.now()}`,
+            customerName: cust ? cust.name : clause.entityRaw || 'Grahak',
+            customerSubtitle: cust ? cust.descriptor : 'Counter Customer',
+            type: clause.txType === 'JAMA' ? 'JAMA' : 'UDHAAR',
+            amount: clause.normalizedAmount,
+            rawSpokenAmount: clause.rawAmount,
+            date: clause.dateString,
+            relativeDateLabel: clause.relativeDateLabel,
+            timestamp: Date.now(),
+            status: clause.isSelfCorrection ? 'CORRECTED_IN_STREAM' : 'COMMITTED',
+            auditFlag: clause.isSelfCorrection
+              ? '[CORRECTED_IN_STREAM]'
+              : '[VOICE_AUTO_COMMITTED]',
+            originalClause: clause.originalClause
+          };
+
+          await addLedgerEntry(newEntry);
+          audioEngine.playCommitPip();
+        }
+      }
+
+      await refreshDbData();
+    },
+    [refreshDbData]
+  );
+
+  // Speech Recognition Stream Ingestion Callback
+  const handleTranscriptStream = useCallback(
+    (text: string, isFinal: boolean) => {
+      setRawTranscript(text);
+      if (!isFinal) {
+        setInterimTranscript(text);
+      } else {
+        setInterimTranscript('');
+      }
+
+      // Live Parse AST
+      const parsed = parseUtterance(text, customersRef.current);
+      setClauses(parsed);
+
+      if (isFinal) {
+        const sttDuration = Math.round(performance.now() - recognitionStartTimeRef.current);
+        const queryClause = parsed.find((p) => p.isQuery);
+        if (queryClause) {
+          handleQueryExecution(queryClause, sttDuration);
+        } else {
+          commitParsedClauses(parsed);
+        }
+      }
+    },
+    [commitParsedClauses, handleQueryExecution]
+  );
+
+  // Initialize Speech Recognition Hook
+  useEffect(() => {
+    speechRecognitionEngine.subscribe(
+      handleTranscriptStream,
+      (listening) => {
+        setIsListening(listening);
+      }
+    );
+  }, [handleTranscriptStream]);
+
+  // Toggle Listening
+  const handleToggleListening = useCallback(async () => {
+    audioEngine.playMechanicalClick();
+    if (isListening) {
+      speechRecognitionEngine.stopListening();
+      setIsListening(false);
+    } else {
+      await audioEngine.initContext();
+      await audioEngine.startMicrophone();
+      recognitionStartTimeRef.current = performance.now();
+      speechRecognitionEngine.setLanguage(language);
+      speechRecognitionEngine.startListening();
+      setIsListening(true);
+    }
+  }, [isListening, language]);
+
+  // Keyboard Spacebar Push-to-Talk Handler
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+      // Don't trigger if user is typing in an input
+      if (
+        e.code === 'Space' &&
+        document.activeElement?.tagName !== 'INPUT' &&
+        document.activeElement?.tagName !== 'TEXTAREA'
+      ) {
         e.preventDefault();
-        setIsCommandPaletteOpen((prev) => !prev);
+        if (!isListening) {
+          handleToggleListening();
+        }
       }
     };
+
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
+  }, [isListening, handleToggleListening]);
 
-  // Sync route with page title and canonical URL
-  useEffect(() => {
-    const titles: Record<AppRoute, string> = {
-      home: `${siteConfig.projectName}: AI for Open Source Issue Triage and First Reply Drafting`,
-      dashboard: `Triage Dashboard and SQLite Audit Log: ${siteConfig.projectName}`,
-      docs: `Architecture and Technical Documentation: ${siteConfig.projectName}`,
-      privacy: `Privacy Policy: ${siteConfig.projectName}`,
-      terms: `Terms and Conditions: ${siteConfig.projectName}`,
-      domain: `Custom Domain Configuration: ${siteConfig.projectName}`,
-      install: `Install GitHub App: ${siteConfig.projectName}`,
-      '404': `404 Not Found: ${siteConfig.projectName}`
+  // Shop-Noise Simulator Toggle
+  const handleToggleNoise = (enable?: boolean, snr?: number) => {
+    audioEngine.playMechanicalClick();
+    const effectiveSnr = snr !== undefined ? snr : snrDb;
+    setSnrDb(effectiveSnr);
+    const active = audioEngine.toggleShopNoise(enable, effectiveSnr);
+    setIsNoiseActive(active);
+  };
+
+  // Voice Clarity DSP Toggle
+  const handleToggleDsp = (active: boolean) => {
+    audioEngine.playMechanicalClick();
+    audioEngine.setDspActive(active);
+    setDspActive(active);
+  };
+
+  // Language Change
+  const handleLanguageChange = (lang: 'hi-IN' | 'en-IN' | 'kn-IN' | 'ta-IN') => {
+    audioEngine.playMechanicalClick();
+    setLanguage(lang);
+    speechRecognitionEngine.setLanguage(lang);
+  };
+
+  // Quick Test Deck Phrase Injection
+  const handleInjectTestPhrase = async (phrase: string) => {
+    await audioEngine.initContext();
+    recognitionStartTimeRef.current = performance.now();
+    setRawTranscript(phrase);
+    setInterimTranscript('');
+
+    const parsed = parseUtterance(phrase, customersRef.current);
+    setClauses(parsed);
+
+    // Stream word by word into simulation
+    await speechRecognitionEngine.injectSimulatedStream(phrase, (partial) => {
+      setRawTranscript(partial);
+    });
+
+    const sttDuration = Math.round(performance.now() - recognitionStartTimeRef.current);
+    const queryClause = parsed.find((p) => p.isQuery);
+    if (queryClause) {
+      await handleQueryExecution(queryClause, sttDuration);
+    } else {
+      await commitParsedClauses(parsed);
+    }
+  };
+
+  // Homonym Disambiguation Resolution
+  const handleResolveDisambiguation = async (chosenCustomer: Customer) => {
+    if (!disambiguationState) return;
+    audioEngine.playMechanicalClick();
+
+    const { clause, amount, txType } = disambiguationState;
+    const entryId = `tx-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+
+    const newEntry: LedgerEntry = {
+      id: entryId,
+      customerId: chosenCustomer.id,
+      customerName: chosenCustomer.name,
+      customerSubtitle: chosenCustomer.descriptor,
+      type: txType,
+      amount,
+      rawSpokenAmount: clause.rawAmount,
+      date: clause.dateString,
+      relativeDateLabel: clause.relativeDateLabel,
+      timestamp: Date.now(),
+      status: 'COMMITTED',
+      auditFlag: `[DISAMBIGUATED: ${chosenCustomer.descriptor.toUpperCase()}]`,
+      originalClause: clause.originalClause
     };
 
-    document.title = titles[currentRoute];
+    await addLedgerEntry(newEntry);
+    audioEngine.playCommitPip();
+    setDisambiguationState(null);
+    await refreshDbData();
+  };
 
-    // Update history without page reload
-    const currentPath = currentRoute === 'home' ? '/' : `/${currentRoute}`;
-    if (window.location.pathname !== currentPath) {
-      window.history.pushState({ route: currentRoute }, '', currentPath);
+  // Customer Opt-In Consent Toggle (DPDP Act 2023)
+  const handleToggleCustomerConsent = async (customerId: string, consent: boolean) => {
+    audioEngine.playMechanicalClick();
+    await updateCustomerOptIn(customerId, consent);
+    await refreshDbData();
+    if (reminderCustomer && reminderCustomer.id === customerId) {
+      setReminderCustomer({
+        ...reminderCustomer,
+        optInConsent: consent,
+        consentTimestamp: consent ? new Date().toISOString() : undefined
+      });
     }
+  };
 
-    // Scroll to top upon route completion
-    window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
-  }, [currentRoute]);
-
-  // Handle browser popstate (back/forward navigation)
-  useEffect(() => {
-    const handlePopState = (e: PopStateEvent) => {
-      if (e.state && e.state.route) {
-        setCurrentRoute(e.state.route);
-      } else {
-        setCurrentRoute(getInitialRoute());
-      }
-    };
-    window.addEventListener('popstate', handlePopState);
-    return () => window.removeEventListener('popstate', handlePopState);
-  }, []);
-
-  // Navigation handler triggered strictly by navigation clicks
-  const navigateTo = useCallback((newRoute: AppRoute) => {
-    if (newRoute === currentRoute) return;
-
-    // Never block the user: if navigating again mid-transition, cancel and switch immediately
-    if (is3DTransitionActive) {
-      setCurrentRoute(newRoute);
-      setTargetRoute(null);
-      setIs3DTransitionActive(false);
-      return;
+  // Re-seed database
+  const handleResetDb = async () => {
+    audioEngine.playMechanicalClick();
+    if (window.confirm('Reset local encrypted IndexedDB store to initial Kirana accounts?')) {
+      await resetDatabase();
+      await refreshDbData();
     }
+  };
 
-    // Check accessibility and hardware capabilities
-    const reducedMotion = prefersReducedMotion();
-    const webGLSupported = isWebGLAvailable();
-
-    if (reducedMotion || !webGLSupported) {
-      // Direct subtle fade without 3D animation
-      setCurrentRoute(newRoute);
-      return;
-    }
-
-    // Trigger 3D route transition
-    setTargetRoute(newRoute);
-    setIs3DTransitionActive(true);
-  }, [currentRoute, is3DTransitionActive]);
-
-  const handleTransitionMidpoint = useCallback(() => {
-    if (targetRoute) {
-      setCurrentRoute(targetRoute);
-      window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
-    }
-  }, [targetRoute]);
-
-  const handleTransitionComplete = useCallback(() => {
-    setTargetRoute(null);
-    setIs3DTransitionActive(false);
-  }, []);
-
-  const handleNavigateWorkbench = useCallback(() => {
-    navigateTo('dashboard');
-  }, [navigateTo]);
+  const securityStatus = getSecurityStatus();
 
   return (
-    <div className="app-root">
-      {/* WCAG Skip to Main Content Link */}
-      <a href="#main-content" className="skip-to-content">
-        Skip to main content
-      </a>
-
-      {/* Semantic Accessible Header */}
+    <div className="min-h-screen bg-[#141413] text-[#F4F1EA] flex flex-col font-sans">
+      {/* Top Industrial Header */}
       <Header
-        currentRoute={currentRoute}
-        onNavigate={navigateTo}
-        onOpenCommandPalette={() => setIsCommandPaletteOpen(true)}
+        currentView={currentView}
+        onSelectView={handleSelectView}
+        isListening={isListening}
+        dspActive={dspActive}
+        onOpenCustomDomain={() => setCustomDomainOpen(true)}
+        onResetDb={handleResetDb}
       />
 
-      {/* Global Command Palette Modal */}
-      <CommandPalette
-        isOpen={isCommandPaletteOpen}
-        onClose={() => setIsCommandPaletteOpen(false)}
-        onNavigate={navigateTo}
-      />
+      {/* 3D Spatial Hardware Workspace */}
+      <main className="flex-1 w-full bg-[#141413]">
+        <SpatialStage currentView={currentView}>
+          {currentView === 'console' && (
+            <LiveVoiceConsole
+              isListening={isListening}
+              onToggleListening={handleToggleListening}
+              rawTranscript={rawTranscript}
+              interimTranscript={interimTranscript}
+              clauses={clauses}
+              isNoiseActive={isNoiseActive}
+              onToggleNoise={handleToggleNoise}
+              snrDb={snrDb}
+              dspActive={dspActive}
+              onToggleDsp={handleToggleDsp}
+              language={language}
+              onLanguageChange={handleLanguageChange}
+              latencyMetrics={latencyMetrics}
+              onManualTextSubmit={handleInjectTestPhrase}
+            />
+          )}
 
-      {/* Main Content Area */}
-      <main id="main-content" tabIndex={-1} style={{ outline: 'none' }}>
-        {currentRoute === 'home' && (
-          <HomePage
-            onNavigateWorkbench={handleNavigateWorkbench}
-            onNavigateInstall={() => navigateTo('install')}
-          />
-        )}
-        {currentRoute === 'dashboard' && <DashboardPage />}
-        {currentRoute === 'docs' && <DocsPage />}
-        {currentRoute === 'domain' && (
-          <div className="container section page-fade">
-            <CustomDomainConfig />
-          </div>
-        )}
-        {currentRoute === 'privacy' && <PrivacyPage />}
-        {currentRoute === 'terms' && <TermsPage />}
-        {currentRoute === 'install' && <InstallPage />}
-        {currentRoute === '404' && <NotFoundPage onNavigate={navigateTo} />}
+          {currentView === 'ledger' && (
+            <BahiKhataLedger
+              entries={entries}
+              customers={customers}
+              onOpenReminderModal={(cust) => setReminderCustomer(cust)}
+              onRefreshData={refreshDbData}
+              encryptionStatus={securityStatus}
+            />
+          )}
+
+          {currentView === 'judge' && (
+            <JudgeStressTestDeck
+              onInjectPhrase={handleInjectTestPhrase}
+              latencyMetrics={latencyMetrics}
+              isNoiseActive={isNoiseActive}
+              onToggleNoise={handleToggleNoise}
+              dspActive={dspActive}
+              onToggleDsp={handleToggleDsp}
+            />
+          )}
+
+          {currentView === 'privacy' && <PrivacyPolicyView />}
+
+          {currentView === 'terms' && <TermsConditionsView />}
+        </SpatialStage>
       </main>
 
-      {/* Semantic Accessible Footer on Every Page */}
-      <Footer onNavigate={navigateTo} />
-
-      {/* Lazy-Loaded 3D Transition Canvas with Lightweight Loading Skeleton */}
-      {is3DTransitionActive && (
-        <Suspense
-          fallback={
-            <div
-              className="route-transition-canvas-wrapper"
-              style={{
-                backgroundColor: 'rgba(14, 17, 22, 0.4)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                pointerEvents: 'none'
-              }}
+      {/* Industrial Hardware Footer */}
+      <footer className="bg-[#0E0E0D] border-t border-[#2D2D2A] text-[#8E8A82] py-4 px-4 sm:px-6 lg:px-8 text-xs font-mono-tech select-none w-full">
+        <div className="w-full flex flex-col sm:flex-row items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <span className="text-[#C88A2B] font-bold">VOICE KHATA // PS2</span>
+            <span>ZERO-TOUCH INDIC AUDIO LEDGER</span>
+          </div>
+          <div className="flex items-center gap-4 text-[11px]">
+            <button
+              type="button"
+              onClick={() => handleSelectView('privacy')}
+              className="hover:text-[#F4F1EA]"
             >
-              <div className="skeleton-loader" style={{ width: 120, height: 4, borderRadius: 2 }} />
-            </div>
-          }
-        >
-          <ThreeTransition
-            onMidpoint={handleTransitionMidpoint}
-            onTransitionEnd={handleTransitionComplete}
-            durationMs={750}
-          />
-        </Suspense>
+              [PRIVACY_POLICY // DPDP_ACT_2023]
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSelectView('terms')}
+              className="hover:text-[#F4F1EA]"
+            >
+              [TERMS_AND_CONDITIONS]
+            </button>
+            <span className="text-[#575550]">LOCAL_FIRST // AES_GCM_256</span>
+          </div>
+        </div>
+      </footer>
+
+      {/* Disambiguation Modal */}
+      {disambiguationState && (
+        <DisambiguationModal
+          isOpen={disambiguationState.isOpen}
+          options={disambiguationState.options}
+          amount={disambiguationState.amount}
+          txType={disambiguationState.txType}
+          onResolve={handleResolveDisambiguation}
+          onCancel={() => setDisambiguationState(null)}
+        />
       )}
+
+      {/* Polite Opt-In Reminder Modal */}
+      <PoliteReminderModal
+        isOpen={Boolean(reminderCustomer)}
+        customer={reminderCustomer}
+        onClose={() => setReminderCustomer(null)}
+        onToggleConsent={handleToggleCustomerConsent}
+      />
+
+      {/* Custom Domain Modal */}
+      <CustomDomainModal
+        isOpen={customDomainOpen}
+        onClose={() => setCustomDomainOpen(false)}
+      />
     </div>
   );
-}
+};
+
+export default App;
